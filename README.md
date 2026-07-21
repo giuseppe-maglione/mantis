@@ -5,17 +5,6 @@
 # Project Mantis:  *Hacking Back the AI-Hacker*
 ## Prompt Injection as a Defense Against LLM-driven Cyberattacks
 
-🔨Working on transforming Mantis from an academic PoC to a full-fledged and robust defensive tool for your assets. 🪚  
-
-⚠️ Until an official release, this code might undergo severe refactoring and breaking updates. ⚠️
-
-#### Next Milestones:
-
-- [x] Multi-threading for decoys
-- [ ]  Advanced agent tracking capabilities
-- [x]  Web-based decoy
-- [ ]  Refactoring Mantis as a Daemon/Controller interface
-- [x] Attacker's partial IP blocking after trigger
 
 ## Install Mantis
 
@@ -181,9 +170,6 @@ A list of tuples ```("port", ("decoy class", "decoy conf"))``` that define decoy
 A boolean flag that, if set to True, will kill the decoy process after the trigger event is executed. It might not be implemented in all the decoys.
 
 
-# Create your own decoy
-
-TODO
 
 # White paper
 A general description of Mantis's internal working is given in this [paper](https://arxiv.org/abs/2410.20911). Follow a description of the material necessary to replicate our evaluation.
