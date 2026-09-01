@@ -108,5 +108,5 @@ class DefaultInjectionManager:
 			self.IP_blocker.cleanup()
 		logger.info("Cleanup complete, exiting.")
 		
-	def __del__():
+	def __del__(self):
 		self.cleanup()
