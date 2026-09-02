@@ -89,7 +89,7 @@ class TarpitFTP(AnonymousFTP):
         if user.lower() == 'anonymous':
             logger.critical(f"{user}@{client_address} into the tarpit")
             
-            msg = b"230 Login Successful"
+            msg = b"230 Login Successful - "
             msg, _ = injection_manager(client_address, self.source_name, self.name, msg)
             msg += b'\r\n'
             client_socket.sendall(msg)
@@ -100,7 +100,7 @@ class TarpitFTP(AnonymousFTP):
         """Handle the PASS command."""
         password = data.split(' ')[1] if len(data.split(' ')) > 1 else "Unknown"
         if user.lower() == 'anonymous':
-            client_socket.sendall(b"230 Anonymous login successful\r\n")
+            client_socket.sendall(b"230 Anonymous login successful - \r\n")
             return True
         else:
             client_socket.sendall(b"530 Login incorrect\r\n")

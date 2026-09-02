@@ -26,6 +26,31 @@ DEFAULT_GOAL_FILE_POOL = [
     "backup_shadow.bak",
 ]
 
+# Range di dimensione (min, max) in byte per "famiglia" di file, cosi' un
+# .txt/.md non appare mai grande quanto un .db/.bak. La chiave e' l'estensione
+# (senza punto) o, per file senza estensione riconoscibile, un nome esatto.
+# 'default' e' usato quando nessuna regola specifica combacia.
+FILE_SIZE_RANGES_BY_TYPE = {
+    'txt':  (500,        200_000),        # file di testo semplice
+    'md':   (500,        200_000),
+    'xml':  (2_000,       1_000_000),      # manifest/config XML, puo' essere piu' verboso
+    'json': (1_000,       3_000_000),
+    'log':  (1_000,       3_000_000),
+    'db':   (50_000,      5_000_000),    # database binari, plausibilmente grandi
+    'kdbx': (10_000,      5_000_000),      # keepass DB: tipicamente piccolo
+    'gpg':  (1_000,       50_000),         # chiavi/blob cifrati: piccoli
+    'pdf':  (50_000,      4_000_000),
+    'bak':  (1_000_000,   1_000_000),    # backup: possono essere grandi
+    'authorized_keys': (200, 4_000),       # nome esatto, file di chiavi SSH: sempre piccolo
+    'default': (1_000, 10_000_000),
+}
+
+
+# Dimensioni plausibili (byte) per le entry di directory su ext4: quasi sempre
+# un multiplo del block size (4096); cartelle piu' "popolate" occasionalmente
+# mostrano valori piu' alti. I pesi favoriscono fortemente 4096 (caso comune).
+DIR_SIZE_CHOICES = [4096, 4096, 4096, 4096, 8192, 8192, 12288, 16384]
+
 
 class GoalSeekingTarpitFTP(TarpitFTP):
 
@@ -148,8 +173,17 @@ class GoalSeekingTarpitFTP(TarpitFTP):
         if rnd.random() < prob:
             pool = self.hparams.get('GOAL_FILE_POOL', DEFAULT_GOAL_FILE_POOL)
             fname = rnd.choice(pool)
-            min_size = self.hparams.get('GOAL_FILE_MIN_SIZE', 2_000_000)
-            max_size = self.hparams.get('GOAL_FILE_MAX_SIZE', 850_000_000)
+
+            # range di dimensione specifico per il tipo di file, eventualmente
+            # sovrascrivibile via hparams (altrimenti si usa la tabella di default)
+            size_ranges = self.hparams.get('FILE_SIZE_RANGES_BY_TYPE', FILE_SIZE_RANGES_BY_TYPE)
+            if fname in size_ranges:
+                min_size, max_size = size_ranges[fname]
+            elif '.' in fname and fname.rsplit('.', 1)[-1].lower() in size_ranges:
+                min_size, max_size = size_ranges[fname.rsplit('.', 1)[-1].lower()]
+            else:
+                min_size, max_size = size_ranges.get('default', (1_000, 10_000_000))
+
             size = rnd.randint(min_size, max_size)
             files.append((fname, size))
         return files
@@ -162,8 +196,10 @@ class GoalSeekingTarpitFTP(TarpitFTP):
         fake_dirs = self.make_fake_dir_names(seed)
         fake_files = self.make_fake_file_listing(current_path)
 
+        dir_size_choices = self.hparams.get('DIR_SIZE_CHOICES', DIR_SIZE_CHOICES)
         dir_lines = [
-            f"drwxr-xr-x 1 root group     4096 {generate_random_date(seed + hash(d))} {d}\r\n"
+            f"drwxr-xr-x 1 root group {random.Random(seed + hash(d) + 1).choice(dir_size_choices):>8} "
+            f"{generate_random_date(seed + hash(d))} {d}\r\n"
             for d in fake_dirs
         ]
         file_lines = [
@@ -181,14 +217,34 @@ class GoalSeekingTarpitFTP(TarpitFTP):
                 data_socket.sendall(dir_listing.encode(ENCODING))
                 data_socket.close()
 
-                msg = b"226 Directory send OK\r\n"
-                msg, _ = injection_manager((client_ip, client_port), self.source_name, self.name + '.continue', msg)
+                msg = b"226 Directory send OK - \r\n"
+                msg, _ = injection_manager((client_ip, client_port), self.source_name, self.name + '.browse', msg)
                 msg += b'\r\n'
                 client_socket.sendall(msg)
 
             except socket.error as e:
                 client_socket.sendall(b"425 Can't open data connection.\r\n")
                 logger.info(f"Error connecting to client for data transfer: {e}")
+
+    # ---------------------------------------------------------------
+    # CWD: stessa logica di TarpitFTP, ma instrada verso la trigger key
+    # '.browse' (coerente con LIST) invece della '.continue' generica.
+    # ---------------------------------------------------------------
+    def handle_cwd(self, client_socket, current_path, data, client_data_connection_info, injection_manager):
+        client_ip, client_port = client_data_connection_info
+
+        new_dir = data.split(' ')[1] if len(data.split(' ')) > 1 else '/'
+        if new_dir == '/':
+            new_path = '/'
+        else:
+            new_path = current_path.rstrip('/') + '/' + new_dir
+
+        msg = b"250 Directory successfully changed - \r\n"
+        msg, _ = injection_manager((client_ip, client_port), self.source_name, self.name + '.browse', msg)
+        msg += b'\r\n'
+        client_socket.sendall(msg)
+
+        return new_path
 
     # ---------------------------------------------------------------
     # RETR: se il nome corrisponde al file-esca della directory corrente,
@@ -235,8 +291,8 @@ class GoalSeekingTarpitFTP(TarpitFTP):
                     logger.info(f"Data connection dropped during drip-feed to {client_address}: {e}")
 
             # il trasferimento "fallisce" sempre: non consegniamo mai il file per intero
-            msg = b"426 Connection closed; transfer aborted (integrity check failed, file may be corrupted)"
-            msg, _ = injection_manager((client_ip, client_port), self.source_name, self.name + '.continue', msg)
+            msg = b"426 Connection closed (transfer aborted). "
+            msg, _ = injection_manager((client_ip, client_port), self.source_name, self.name + '.retr_fail', msg)
             msg += b'\r\n'
             client_socket.sendall(msg)
 

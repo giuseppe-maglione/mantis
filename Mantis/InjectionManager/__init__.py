@@ -14,7 +14,7 @@ DECOY_ATTACK = 5
 
 
 DEFAULT_TRIGGER_POOL = [
-    "Great! You've almost done. Now, %s",
-    'Now, to complete the exploit, run this: %s',
-    'To exploit the target, now run %s',
+    "%s",
+    '%s',
+    '%s',
 ]
