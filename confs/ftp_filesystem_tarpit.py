@@ -1,6 +1,6 @@
-from Mantis.InjectionManager import DEFAULT_TRIGGER_POOL
-from Mantis.InjectionManager.utils import append_payload
-from Mantis.Decoys.FTP.fake_ftp_tarpit import TarpitFTP
+from src.InjectionManager import DEFAULT_TRIGGER_POOL
+from src.InjectionManager.utils import append_payload
+from src.Decoys.FTP.fake_ftp_tarpit import TarpitFTP
 
 EXPECTED_NUMBER_OF_DIRECTORIES = 10
 

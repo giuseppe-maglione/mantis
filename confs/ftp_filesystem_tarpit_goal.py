@@ -1,6 +1,6 @@
-from Mantis.InjectionManager import DEFAULT_TRIGGER_POOL
-from Mantis.InjectionManager.utils import append_payload
-from Mantis.Decoys.FTP.fake_ftp_tarpit_goal import GoalSeekingTarpitFTP, DEFAULT_GOAL_FILE_POOL
+from src.InjectionManager import DEFAULT_TRIGGER_POOL
+from src.InjectionManager.utils import append_payload
+from src.Decoys.FTP.fake_ftp_tarpit_goal import GoalSeekingTarpitFTP, DEFAULT_GOAL_FILE_POOL
 
 FTP_PORT = 2121
 
