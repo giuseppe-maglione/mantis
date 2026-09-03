@@ -51,6 +51,11 @@ FILE_SIZE_RANGES_BY_TYPE = {
 # mostrano valori piu' alti. I pesi favoriscono fortemente 4096 (caso comune).
 DIR_SIZE_CHOICES = [4096, 4096, 4096, 4096, 8192, 8192, 12288, 16384]
 
+# Banner realistico: replica quello di default di vsftpd (il server FTP piu'
+# diffuso su Linux), invece di una stringa inventata facilmente segnalabile
+# come "non riconosciuta" da un fingerprint di service-detection.
+REALISTIC_SERVER_BANNER = b'(vsFTPd 3.0.3)'
+
 
 class GoalSeekingTarpitFTP(TarpitFTP):
 
@@ -80,40 +85,68 @@ class GoalSeekingTarpitFTP(TarpitFTP):
 
     source_name = 'Decoy.tarpit.FTP.goal_seeking'
 
+
+    # ---------------------------------------------------------------
+    # Banner iniziale: usa un banner realistico (default vsftpd) invece
+    # della stringa generica di TarpitFTP/AnonymousFTP, sovrascrivibile
+    # via hparams['SERVER_BANNER'] se serve un fingerprint diverso.
+    # ---------------------------------------------------------------
+    def __call__(self, client_socket, client_address, injection_manager):
+        banner = self.hparams.get('SERVER_BANNER', REALISTIC_SERVER_BANNER)
+ 
+        if 'BANNER_INJECTION_POOL' in self.hparams:
+            payload = random.choice(self.hparams['BANNER_INJECTION_POOL'])
+            from ...InjectionManager.utils import make_text_invisible_terminal
+            payload = make_text_invisible_terminal(payload)
+            banner += payload.encode()
+ 
+        client_socket.sendall(b"220 %s\r\n" % banner)
+        self.handle_ftp_session(client_socket, client_address, injection_manager)
+
+
     # ---------------------------------------------------------------
     # Loop principale di sessione: identico a TarpitFTP, ma con RETR
     # istruito a riconoscere il file esca e innescare il drip-feed.
     # ---------------------------------------------------------------
     def handle_ftp_session(self, client_socket, client_address, injection_manager):
         with client_socket:
-
+ 
             user = None
             authenticated = False
             current_path = '/'
             client_data_connection_info = None
-
+ 
             while True:
-                data = client_socket.recv(BUFFSIZE).decode(ENCODING).strip()
-
-                if not data:
+                raw = client_socket.recv(BUFFSIZE)
+ 
+                if not raw:
                     break
-
+ 
+                # Un client FTP che interrompe un RETR con Ctrl+C invia sul canale
+                # di controllo una sequenza Telnet IAC (byte 0xFF e affini) prima
+                # del comando ABOR. Questi byte non sono UTF-8 valido: li scartiamo
+                # invece di far crashare il thread su un'eccezione di decodifica.
+                data = raw.decode(ENCODING, errors='ignore').strip()
+ 
+                if not data:
+                    continue
+ 
                 logger.info(f"Received from {client_address}: {data}")
-
+ 
                 if data.upper().startswith('USER'):
                     self.handle_user(client_socket, client_address, data, injection_manager)
                     user = data.split(' ')[1] if len(data.split(' ')) > 1 else "Unknown"
                     authenticated = user.lower() == 'anonymous'
-
+ 
                 elif data.upper().startswith('PASS'):
                     authenticated = self.handle_pass(client_socket, client_address, user, data)
-
+ 
                 elif data.upper() == 'PWD':
                     if authenticated:
                         self.handle_pwd(client_socket, current_path)
                     else:
-                        client_socket.sendall(b"530 Not logged in\r\n")
-
+                        client_socket.sendall(b"530 Not Fin\r\n")
+ 
                 elif data.upper().startswith('LIST'):
                     if authenticated:
                         if client_data_connection_info:
@@ -122,7 +155,7 @@ class GoalSeekingTarpitFTP(TarpitFTP):
                             client_socket.sendall(b"425 Use PORT or PASV first.\r\n")
                     else:
                         client_socket.sendall(b"530 Not logged in\r\n")
-
+ 
                 elif data.upper().startswith('RETR'):
                     if authenticated:
                         filename = data.split(' ', 1)[1].strip() if len(data.split(' ', 1)) > 1 else ''
@@ -131,26 +164,33 @@ class GoalSeekingTarpitFTP(TarpitFTP):
                         self.handle_retr(client_socket, current_path, filename, client_data_connection_info, injection_manager, client_address)
                     else:
                         client_socket.sendall(b"530 Not logged in\r\n")
-
+ 
                 elif data.upper().startswith('CWD'):
                     if authenticated:
                         current_path = self.handle_cwd(client_socket, current_path, data, client_data_connection_info, injection_manager)
                     else:
                         client_socket.sendall(b"530 Not logged in\r\n")
-
+ 
                 elif data.upper().startswith('PORT'):
                     if authenticated:
                         client_data_connection_info = self.handle_port(client_socket, data)
                     else:
                         client_socket.sendall(b"530 Not logged in\r\n")
-
+ 
                 elif data.upper() == 'QUIT':
                     self.handle_quit(client_socket)
                     break
-
+ 
+                elif data.upper().startswith('ABOR'):
+                    # Il client ha interrotto un trasferimento in corso (es. Ctrl+C
+                    # durante un RETR). A questo punto il nostro handle_retr e' gia'
+                    # uscito dal drip-feed (la connessione dati e' stata chiusa dal
+                    # client), quindi rispondiamo semplicemente in modo standard.
+                    client_socket.sendall(b"225 ABOR command successful.\r\n")
+ 
                 else:
                     client_socket.sendall(b"500 Unknown command\r\n")
-
+ 
             logger.info(f"Closing connection to {client_address}")
 
     # ---------------------------------------------------------------
@@ -213,18 +253,21 @@ class GoalSeekingTarpitFTP(TarpitFTP):
             try:
                 data_socket.connect((client_ip, client_port))
                 client_socket.sendall(b"150 Here comes the directory listing\r\n")
-                time.sleep(1)
+                # generatore indipendente da quello (globale, riseminato per path)
+                # usato per dir/file, cosi' il ritardo e' davvero casuale ad ogni richiesta
+                time.sleep(random.Random().uniform(0.5, 1.5))
                 data_socket.sendall(dir_listing.encode(ENCODING))
                 data_socket.close()
-
+ 
                 msg = b"226 Directory send OK - \r\n"
                 msg, _ = injection_manager((client_ip, client_port), self.source_name, self.name + '.browse', msg)
                 msg += b'\r\n'
                 client_socket.sendall(msg)
-
+ 
             except socket.error as e:
                 client_socket.sendall(b"425 Can't open data connection.\r\n")
                 logger.info(f"Error connecting to client for data transfer: {e}")
+
 
     # ---------------------------------------------------------------
     # CWD: stessa logica di TarpitFTP, ma instrada verso la trigger key
