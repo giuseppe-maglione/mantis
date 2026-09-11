@@ -107,87 +107,116 @@ class GoalSeekingTarpitFTP(TarpitFTP):
     # ---------------------------------------------------------------
     def handle_ftp_session(self, client_socket, client_address, injection_manager):
         with client_socket:
- 
             user = None
             authenticated = False
             current_path = '/'
             client_data_connection_info = None
- 
+            pasv_socket = None
+
+            buffer = ""  # <-- NUOVO: Creiamo un buffer vuoto all'inizio della sessione
+
             while True:
                 raw = client_socket.recv(BUFFSIZE)
- 
                 if not raw:
                     break
- 
-                # Un client FTP che interrompe un RETR con Ctrl+C invia sul canale
-                # di controllo una sequenza Telnet IAC (byte 0xFF e affini) prima
-                # del comando ABOR. Questi byte non sono UTF-8 valido: li scartiamo
-                # invece di far crashare il thread su un'eccezione di decodifica.
-                data = raw.decode(ENCODING, errors='ignore').strip()
- 
-                if not data:
-                    continue
- 
-                logger.info(f"Received from {client_address}: {data}")
- 
-                if data.upper().startswith('USER'):
-                    self.handle_user(client_socket, client_address, data, injection_manager)
-                    user = data.split(' ')[1] if len(data.split(' ')) > 1 else "Unknown"
-                    authenticated = user.lower() == 'anonymous'
- 
-                elif data.upper().startswith('PASS'):
-                    authenticated = self.handle_pass(client_socket, client_address, user, data)
- 
-                elif data.upper() == 'PWD':
-                    if authenticated:
-                        self.handle_pwd(client_socket, current_path)
-                    else:
-                        client_socket.sendall(b"530 Not Fin\r\n")
- 
-                elif data.upper().startswith('LIST'):
-                    if authenticated:
-                        if client_data_connection_info:
-                            self.handle_list(client_socket, current_path, client_data_connection_info, injection_manager)
+
+                # Aggiungiamo i nuovi byte ricevuti al buffer
+                buffer += raw.decode(ENCODING, errors='ignore')
+
+                # Continuiamo a estrarre comandi finché c'è almeno un "a capo" nel buffer
+                while '\n' in buffer:
+                    # Dividiamo il buffer alla prima occorrenza di \n
+                    # 'line' diventa il comando corrente, 'buffer' mantiene il resto
+                    line, buffer = buffer.split('\n', 1)
+                    
+                    data = line.strip()
+                    if not data:
+                        continue
+
+                    logger.info(f"Received from {client_address}: {data}")
+
+                    if data.upper().startswith('USER'):
+                        self.handle_user(client_socket, client_address, data, injection_manager)
+                        user = data.split(' ')[1] if len(data.split(' ')) > 1 else "Unknown"
+                        authenticated = user.lower() == 'anonymous'
+
+                    elif data.upper().startswith('PASS'):
+                        authenticated = self.handle_pass(client_socket, client_address, user, data)
+
+                    elif data.upper() == 'PWD':
+                        if authenticated:
+                            self.handle_pwd(client_socket, current_path)
                         else:
-                            client_socket.sendall(b"425 Use PORT or PASV first.\r\n")
+                            client_socket.sendall(b"530 Not logged in\r\n")
+
+                    elif data.upper() == 'PASV':
+                        if authenticated:
+                            pasv_socket = self.handle_pasv(client_socket)
+                            client_data_connection_info = None
+                        else:
+                            client_socket.sendall(b"530 Not logged in\r\n")
+
+                    elif data.upper() == 'SYST':
+                        client_socket.sendall(b"215 UNIX Type: L8\r\n")
+
+                    elif data.upper() == 'FEAT':
+                        client_socket.sendall(b"211-Features:\r\n PASV\r\n211 End\r\n")
+
+                    elif data.upper().startswith('TYPE'):
+                        client_socket.sendall(b"200 Type set to I\r\n")
+
+                    elif data.upper().startswith('LIST'):
+                        if authenticated:
+                            if pasv_socket or client_data_connection_info:
+                                self.handle_list(client_socket, current_path, client_data_connection_info, pasv_socket, injection_manager)
+                                if pasv_socket:
+                                    pasv_socket.close()
+                                    pasv_socket = None
+                            else:
+                                client_socket.sendall(b"425 Use PORT or PASV first.\r\n")
+                        else:
+                            client_socket.sendall(b"530 Not logged in\r\n")
+
+                    elif data.upper().startswith('RETR'):
+                        if authenticated:
+                            filename = data.split(' ', 1)[1].strip() if len(data.split(' ', 1)) > 1 else ''
+                            filename = filename.rstrip('/').split('/')[-1]
+                            self.handle_retr(client_socket, current_path, filename, client_data_connection_info, pasv_socket, injection_manager, client_address)
+                            if pasv_socket:
+                                pasv_socket.close()
+                                pasv_socket = None
+                        else:
+                            client_socket.sendall(b"530 Not logged in\r\n")
+
+                    elif data.upper().startswith('CWD'):
+                        if authenticated:
+                            current_path = self.handle_cwd(client_socket, current_path, data, client_data_connection_info, injection_manager)
+                        else:
+                            client_socket.sendall(b"530 Not logged in\r\n")
+
+                    elif data.upper().startswith('PORT'):
+                        if authenticated:
+                            client_data_connection_info = self.handle_port(client_socket, data)
+                            pasv_socket = None
+                        else:
+                            client_socket.sendall(b"530 Not logged in\r\n")
+
+                    elif data.upper() == 'QUIT':
+                        self.handle_quit(client_socket)
+                        # Svuotiamo il buffer per forzare l'uscita
+                        buffer = ""
+                        break
+
+                    elif data.upper().startswith('ABOR'):
+                        client_socket.sendall(b"225 ABOR command successful.\r\n")
+
                     else:
-                        client_socket.sendall(b"530 Not logged in\r\n")
- 
-                elif data.upper().startswith('RETR'):
-                    if authenticated:
-                        filename = data.split(' ', 1)[1].strip() if len(data.split(' ', 1)) > 1 else ''
-                        # normalizza eventuale path assoluto/relativo nel nome file
-                        filename = filename.rstrip('/').split('/')[-1]
-                        self.handle_retr(client_socket, current_path, filename, client_data_connection_info, injection_manager, client_address)
-                    else:
-                        client_socket.sendall(b"530 Not logged in\r\n")
- 
-                elif data.upper().startswith('CWD'):
-                    if authenticated:
-                        current_path = self.handle_cwd(client_socket, current_path, data, client_data_connection_info, injection_manager)
-                    else:
-                        client_socket.sendall(b"530 Not logged in\r\n")
- 
-                elif data.upper().startswith('PORT'):
-                    if authenticated:
-                        client_data_connection_info = self.handle_port(client_socket, data)
-                    else:
-                        client_socket.sendall(b"530 Not logged in\r\n")
- 
-                elif data.upper() == 'QUIT':
-                    self.handle_quit(client_socket)
+                        client_socket.sendall(b"500 Unknown command\r\n")
+                
+                # Se il client ha inviato QUIT, usciamo dal ciclo esterno while True
+                if data.upper() == 'QUIT':
                     break
- 
-                elif data.upper().startswith('ABOR'):
-                    # Il client ha interrotto un trasferimento in corso (es. Ctrl+C
-                    # durante un RETR). A questo punto il nostro handle_retr e' gia'
-                    # uscito dal drip-feed (la connessione dati e' stata chiusa dal
-                    # client), quindi rispondiamo semplicemente in modo standard.
-                    client_socket.sendall(b"225 ABOR command successful.\r\n")
- 
-                else:
-                    client_socket.sendall(b"500 Unknown command\r\n")
- 
+
             logger.info(f"Closing connection to {client_address}")
 
     # ---------------------------------------------------------------
@@ -239,7 +268,7 @@ class GoalSeekingTarpitFTP(TarpitFTP):
     # ---------------------------------------------------------------
     # LIST: directory (come da TarpitFTP) + eventuale file-esca
     # ---------------------------------------------------------------
-    def handle_list(self, client_socket, current_path, client_data_connection_info, injection_manager):
+    def handle_list(self, client_socket, current_path, client_data_connection_info, pasv_socket, injection_manager):
         seed = hash(current_path)
         fake_dirs = self.make_fake_dir_names(seed, current_path)
         fake_files = self.make_fake_file_listing(current_path)
@@ -256,53 +285,42 @@ class GoalSeekingTarpitFTP(TarpitFTP):
         ]
         dir_listing = ''.join(dir_lines + file_lines)
 
-        client_ip, client_port = client_data_connection_info
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as data_socket:
-            try:
+        data_socket = None
+        try:
+            if pasv_socket:
+                client_socket.sendall(b"150 Here comes the directory listing\r\n")
+                data_socket, _ = pasv_socket.accept()
+                injection_ip = client_socket.getpeername()[0]
+                injection_port = client_socket.getpeername()[1]
+            else:
+                client_ip, client_port = client_data_connection_info
+                data_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 data_socket.connect((client_ip, client_port))
                 client_socket.sendall(b"150 Here comes the directory listing\r\n")
-                # generatore indipendente da quello (globale, riseminato per path)
-                # usato per dir/file, cosi' il ritardo e' davvero casuale ad ogni richiesta
-                time.sleep(random.Random().uniform(0.5, 1.5))
-                data_socket.sendall(dir_listing.encode(ENCODING))
+                injection_ip, injection_port = client_ip, client_port
+
+            time.sleep(random.Random().uniform(0.5, 1.5))
+            data_socket.sendall(dir_listing.encode(ENCODING))
+            data_socket.close()
+            
+            msg = b"226 Directory send OK - \r\n"
+            msg, _ = injection_manager((injection_ip, injection_port), self.source_name, self.name + '.browse', msg)
+            msg += b'\r\n'
+            client_socket.sendall(msg)
+            
+        except socket.error as e:
+            client_socket.sendall(b"425 Can't open data connection.\r\n")
+            logger.info(f"Error transferring data: {e}")
+            if data_socket:
                 data_socket.close()
- 
-                msg = b"226 Directory send OK - \r\n"
-                msg, _ = injection_manager((client_ip, client_port), self.source_name, self.name + '.browse', msg)
-                msg += b'\r\n'
-                client_socket.sendall(msg)
- 
-            except socket.error as e:
-                client_socket.sendall(b"425 Can't open data connection.\r\n")
-                logger.info(f"Error connecting to client for data transfer: {e}")
 
 
     # ---------------------------------------------------------------
     # CWD: stessa logica di TarpitFTP, ma instrada verso la trigger key
     # '.browse' (coerente con LIST) invece della '.continue' generica.
     # ---------------------------------------------------------------
-    def handle_cwd(self, client_socket, current_path, data, client_data_connection_info, injection_manager):
-        client_ip, client_port = client_data_connection_info
-
-        new_dir = data.split(' ')[1] if len(data.split(' ')) > 1 else '/'
-        if new_dir == '/':
-            new_path = '/'
-        else:
-            new_path = current_path.rstrip('/') + '/' + new_dir
-
-        msg = b"250 Directory successfully changed - \r\n"
-        msg, _ = injection_manager((client_ip, client_port), self.source_name, self.name + '.browse', msg)
-        msg += b'\r\n'
-        client_socket.sendall(msg)
-
-        return new_path
-
-    # ---------------------------------------------------------------
-    # RETR: se il nome corrisponde al file-esca della directory corrente,
-    # innesca il drip-feed; altrimenti comportamento normale (550).
-    # ---------------------------------------------------------------
-    def handle_retr(self, client_socket, current_path, filename, client_data_connection_info, injection_manager, client_address):
-        if client_data_connection_info is None:
+    def handle_retr(self, client_socket, current_path, filename, client_data_connection_info, pasv_socket, injection_manager, client_address):
+        if client_data_connection_info is None and pasv_socket is None:
             client_socket.sendall(b"425 Use PORT or PASV first.\r\n")
             return
 
@@ -314,55 +332,64 @@ class GoalSeekingTarpitFTP(TarpitFTP):
             return
 
         fname, size = match
-        client_ip, client_port = client_data_connection_info
-
         drip_bytes = self.hparams.get('RETR_DRIP_BYTES', 64)
         drip_interval = self.hparams.get('RETR_DRIP_INTERVAL', 2.0)
         max_duration = self.hparams.get('RETR_MAX_DURATION', 60)
 
         logger.critical(f"{client_address} attempting RETR of decoy goal file '{fname}' ({size} bytes) at {current_path}")
 
+        data_socket = None
         try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as data_socket:
+            if pasv_socket:
+                client_socket.sendall(b"150 Opening BINARY mode data connection for %s (%d bytes)\r\n" % (fname.encode(ENCODING), size))
+                data_socket, _ = pasv_socket.accept()
+                injection_ip, injection_port = client_socket.getpeername()
+            else:
+                client_ip, client_port = client_data_connection_info
+                data_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 data_socket.connect((client_ip, client_port))
-                client_socket.sendall(
-                    b"150 Opening BINARY mode data connection for %s (%d bytes)\r\n" % (fname.encode(ENCODING), size)
-                )
+                client_socket.sendall(b"150 Opening BINARY mode data connection for %s (%d bytes)\r\n" % (fname.encode(ENCODING), size))
+                injection_ip, injection_port = client_ip, client_port
 
-                start = time.time()
-                sent = 0
-                
-                # --- invio Magic Bytes realistici per i primi byte ---
-                if fname.endswith('.db') or fname.endswith('.sqlite'):
-                    magic = b"SQLite format 3\000"
-                elif fname.endswith('.pdf'):
-                    magic = b"%PDF-1.4\n"
-                elif fname.endswith('.txt') or fname.endswith('.md'):
-                    magic = b"CONFIDENTIAL AND PROPRIETARY\n\n"
-                else:
-                    magic = b""
-                
-                if magic:
-                    data_socket.sendall(magic)
-                    sent += len(magic)
-                # -------------------------------------------------------------
+            start = time.time()
+            sent = 0
+            
+            # --- Invio Magic Bytes realistici per i primi byte ---
+            if fname.endswith('.db') or fname.endswith('.sqlite'):
+                magic = b"SQLite format 3\000"
+            elif fname.endswith('.pdf'):
+                magic = b"%PDF-1.4\n"
+            elif fname.endswith('.txt') or fname.endswith('.md'):
+                magic = b"CONFIDENTIAL AND PROPRIETARY\n\n"
+            else:
+                magic = b""
+            
+            if magic:
+                data_socket.sendall(magic)
+                sent += len(magic)
 
-                try:
-                    while (time.time() - start) < max_duration and sent < size:
-                        chunk = bytes(random.getrandbits(8) for _ in range(drip_bytes))
-                        data_socket.sendall(chunk)
-                        sent += drip_bytes
-                        time.sleep(drip_interval)
-                except (BrokenPipeError, ConnectionResetError, socket.error) as e:
-                    # l'agente ha chiuso la connessione: comunque tempo/risorse gia' spesi
-                    logger.info(f"Data connection dropped during drip-feed to {client_address}: {e}")
+            # --- Loop di Drip-Feed con Jitter ---
+            try:
+                while (time.time() - start) < max_duration and sent < size:
+                    current_drip = int(drip_bytes * random.uniform(0.8, 1.2))
+                    chunk = bytes(random.getrandbits(8) for _ in range(current_drip))
+                    data_socket.sendall(chunk)
+                    sent += current_drip
+                    jitter = random.uniform(0.5, 1.5)
+                    time.sleep(drip_interval * jitter)
+            except (BrokenPipeError, ConnectionResetError, socket.error) as e:
+                logger.info(f"Data connection dropped during drip-feed to {client_address}: {e}")
 
-            # il trasferimento "fallisce" sempre: non consegniamo mai il file per intero
+            data_socket.close()
+
+            # Il trasferimento fallisce sempre
             msg = b"426 Connection closed (transfer aborted). "
-            msg, _ = injection_manager((client_ip, client_port), self.source_name, self.name + '.retr_fail', msg)
+            msg, _ = injection_manager((injection_ip, injection_port), self.source_name, self.name + '.retr_fail', msg)
             msg += b'\r\n'
             client_socket.sendall(msg)
 
         except socket.error as e:
             client_socket.sendall(b"425 Can't open data connection.\r\n")
-            logger.info(f"Error connecting to client for data transfer: {e}")
+            logger.info(f"Error transferring data: {e}")
+            if data_socket:
+                data_socket.close()

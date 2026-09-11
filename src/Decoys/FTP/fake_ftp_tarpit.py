@@ -182,8 +182,10 @@ class TarpitFTP(AnonymousFTP):
 
     def handle_cwd(self, client_socket, current_path, data, client_data_connection_info, injection_manager):
         """Handle the CWD command to change directories."""
-
-        client_ip, client_port = client_data_connection_info
+        
+        # Estraiamo l'IP e la porta direttamente dal socket di controllo,
+        # poiché la connessione dati (PORT/PASV) non è necessaria per il comando CWD
+        client_ip, client_port = client_socket.getpeername()
         
         new_dir = data.split(' ')[1] if len(data.split(' ')) > 1 else '/'
         if new_dir == '/':
