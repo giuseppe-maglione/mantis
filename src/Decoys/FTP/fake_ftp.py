@@ -89,7 +89,7 @@ class AnonymousFTP(DecoyService):
                 else:
                     client_socket.sendall(b"500 Unknown command\r\n")
             
-            logger.info(f"Closing connection to {client_address}")
+            logger.debug(f"Closing connection to {client_address}")
 
     # --- METODI DI UTILITA' EREDITATI DALLE CLASSI FIGLIE ---
 
@@ -119,5 +119,5 @@ class AnonymousFTP(DecoyService):
         msg = f"227 Entering Passive Mode ({h1},{h2},{h3},{h4},{p1},{p2}).\r\n"
         client_socket.sendall(msg.encode(ENCODING))
         
-        logger.info(f"Entered Passive Mode on {local_ip}:{port}")
+        logger.debug(f"Entered Passive Mode on {local_ip}:{port}")
         return pasv_sock

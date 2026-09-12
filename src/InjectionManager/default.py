@@ -50,7 +50,7 @@ class DefaultInjectionManager:
 		kargs['port'] = port
 		logger.info(f"Starting {service_class.__name__} listening on {port}")
 		server = service_class(**kargs)
-		s = threading.Thread(target=server.serve, args=[self])
+		s = threading.Thread(target=server.serve, args=[self], daemon=True)
 		s.start()
 		self.decoy_ths[port] = s
 
@@ -88,7 +88,7 @@ class DefaultInjectionManager:
 		armed_payload = self.make_armed_payload(trigger_pool, payload_pool)
 		armed_payload = self.set_target_ip(attacker_ip, armed_payload)
 
-		logger.critical(f"Trigger event [{keyword}] issued by [{attacker_ip}] via [{source}]. Payload injected: [{armed_payload}]")
+		logger.info(f"[{attacker_ip}] INJECTION ➜ {armed_payload}")
 		
 		self.tracker.add_trigger_event(attacker_ip, attacker_port, source, keyword, armed_payload=armed_payload)
 

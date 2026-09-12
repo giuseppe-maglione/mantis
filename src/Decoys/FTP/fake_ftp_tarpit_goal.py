@@ -1,5 +1,6 @@
 import socket
 import random, time
+import select  # <-- FIX: Modulo necessario per il polling del socket di controllo
 
 from . import *
 from .. import DecoyService
@@ -9,8 +10,6 @@ from ...utils import uniform_random_natural, generate_random_date
 from .fake_ftp_tarpit import TarpitFTP
 
 
-# Nomi di file "obiettivo" plausibili che compaiono nelle directory generate.
-# L'agente li vede in LIST ma non li otterrà mai per intero via RETR.
 DEFAULT_GOAL_FILE_POOL = [
     "credentials.db", "my_credentials.txt", "authorized_keys", "target_manifest.xml",
     "domain_admin.kdbx", "vault_export.json", "network_map.xml", "master_keyring.gpg",
@@ -23,71 +22,30 @@ DEFAULT_MUNDANE_FILE_POOL = [
     "favicon.ico", "app.js", "style.css", "npm-debug.log", "error_log"
 ]
 
-# Range di dimensione (min, max) in byte per "famiglia" di file, cosi' un
-# .txt/.md non appare mai grande quanto un .db/.bak. La chiave e' l'estensione
-# (senza punto) o, per file senza estensione riconoscibile, un nome esatto.
-# 'default' e' usato quando nessuna regola specifica combacia.
 FILE_SIZE_RANGES_BY_TYPE = {
-    'txt':  (500,        200_000),        # file di testo semplice
+    'txt':  (500,        200_000),        
     'md':   (500,        200_000),
-    'xml':  (2_000,       1_000_000),      # manifest/config XML, puo' essere piu' verboso
+    'xml':  (2_000,       1_000_000),      
     'json': (1_000,       3_000_000),
     'log':  (1_000,       3_000_000),
-    'db':   (50_000,      5_000_000),    # database binari, plausibilmente grandi
-    'kdbx': (10_000,      5_000_000),      # keepass DB: tipicamente piccolo
-    'gpg':  (1_000,       50_000),         # chiavi/blob cifrati: piccoli
+    'db':   (50_000,      5_000_000),    
+    'kdbx': (10_000,      5_000_000),      
+    'gpg':  (1_000,       50_000),         
     'pdf':  (50_000,      4_000_000),
-    'bak':  (1_000_000,   1_000_000),    # backup: possono essere grandi
-    'authorized_keys': (200, 4_000),       # nome esatto, file di chiavi SSH: sempre piccolo
+    'bak':  (1_000_000,   1_000_000),    
+    'authorized_keys': (200, 4_000),       
     'default': (1_000, 10_000_000),
 }
 
-
-# Dimensioni plausibili (byte) per le entry di directory su ext4: quasi sempre
-# un multiplo del block size (4096); cartelle piu' "popolate" occasionalmente
-# mostrano valori piu' alti. I pesi favoriscono fortemente 4096 (caso comune).
 DIR_SIZE_CHOICES = [4096, 4096, 4096, 4096, 8192, 8192, 12288, 16384]
 
-# Banner realistico: replica quello di default di vsftpd (il server FTP piu'
-# diffuso su Linux), invece di una stringa inventata facilmente segnalabile
-# come "non riconosciuta" da un fingerprint di service-detection.
 REALISTIC_SERVER_BANNER = b'(vsFTPd 3.0.3)'
 
 
 class GoalSeekingTarpitFTP(TarpitFTP):
 
-    """
-    Variante di TarpitFTP che aggiunge un "obiettivo" fittizio esplorabile:
-    - ogni directory ha una probabilità (crescente con la profondità) di contenere
-      un file "appetibile" (nome + dimensione plausibili) nel LIST;
-    - se l'agente prova a scaricarlo (RETR), la connessione dati resta aperta e
-      riceve un drip-feed di byte a bassa velocità per un tempo configurabile,
-      per massimizzare il tempo/risorse spese dall'agente;
-    - il trasferimento termina sempre con un fallimento "plausibile" (corruzione,
-      integrity check fallito, ecc.) e una nuova prompt-injection lo rispedisce
-      più in profondità nell'albero, mantenendo il loop.
-
-    hparams supportati (tutti opzionali, con default ragionevoli):
-        EXPECTED_NUMBER_OF_DIRECTORIES  (ereditato da TarpitFTP)
-        GOAL_FILE_POOL          : list[str]  - nomi dei file esca
-        GOAL_FILE_BASE_PROB     : float      - probabilità base (depth 0) che compaia un file
-        GOAL_FILE_PROB_SLOPE    : float      - incremento di probabilità per livello di profondità
-        GOAL_FILE_PROB_CAP      : float      - probabilità massima
-        GOAL_FILE_MIN_SIZE      : int        - dimensione minima finta del file (byte)
-        GOAL_FILE_MAX_SIZE      : int        - dimensione massima finta del file (byte)
-        RETR_DRIP_BYTES         : int        - byte inviati per "sorso"
-        RETR_DRIP_INTERVAL      : float      - secondi di attesa tra un sorso e l'altro
-        RETR_MAX_DURATION       : float      - durata massima (secondi) del drip-feed per singolo tentativo
-    """
-
     source_name = 'Decoy.tarpit.FTP.goal_seeking'
 
-
-    # ---------------------------------------------------------------
-    # Banner iniziale: usa un banner realistico (default vsftpd) invece
-    # della stringa generica di TarpitFTP/AnonymousFTP, sovrascrivibile
-    # via hparams['SERVER_BANNER'] se serve un fingerprint diverso.
-    # ---------------------------------------------------------------
     def __call__(self, client_socket, client_address, injection_manager):
         banner = self.hparams.get('SERVER_BANNER', REALISTIC_SERVER_BANNER)
  
@@ -100,11 +58,6 @@ class GoalSeekingTarpitFTP(TarpitFTP):
         client_socket.sendall(b"220 %s\r\n" % banner)
         self.handle_ftp_session(client_socket, client_address, injection_manager)
 
-
-    # ---------------------------------------------------------------
-    # Loop principale di sessione: identico a TarpitFTP, ma con RETR
-    # istruito a riconoscere il file esca e innescare il drip-feed.
-    # ---------------------------------------------------------------
     def handle_ftp_session(self, client_socket, client_address, injection_manager):
         with client_socket:
             user = None
@@ -113,27 +66,33 @@ class GoalSeekingTarpitFTP(TarpitFTP):
             client_data_connection_info = None
             pasv_socket = None
 
-            buffer = ""  # <-- NUOVO: Creiamo un buffer vuoto all'inizio della sessione
+            buffer = "" 
 
             while True:
                 raw = client_socket.recv(BUFFSIZE)
                 if not raw:
                     break
 
-                # Aggiungiamo i nuovi byte ricevuti al buffer
                 buffer += raw.decode(ENCODING, errors='ignore')
 
-                # Continuiamo a estrarre comandi finché c'è almeno un "a capo" nel buffer
                 while '\n' in buffer:
-                    # Dividiamo il buffer alla prima occorrenza di \n
-                    # 'line' diventa il comando corrente, 'buffer' mantiene il resto
                     line, buffer = buffer.split('\n', 1)
                     
                     data = line.strip()
                     if not data:
                         continue
 
-                    logger.info(f"Received from {client_address}: {data}")
+                    # --- NUOVA LOGICA DI LOGGING ESSENZIALE ---
+                    cmd_base = data.split(' ')[0].upper() if data else ""
+                    ip = client_address[0] # Estrae solo l'IP, rimuovendo la porta per pulizia
+                    
+                    # 1. Comandi di esplorazione e interazione (Visibili)
+                    if cmd_base in ['USER', 'PASS', 'CWD', 'LIST', 'RETR', 'PWD']:
+                        logger.info(f"[{ip}] ➜ {data}")
+                    # 2. Negoziazioni di protocollo e comandi silenti (Nascosti)
+                    else:
+                        logger.debug(f"[{ip}] ⚙️ {data}")
+                    # ------------------------------------------
 
                     if data.upper().startswith('USER'):
                         self.handle_user(client_socket, client_address, data, injection_manager)
@@ -203,7 +162,6 @@ class GoalSeekingTarpitFTP(TarpitFTP):
 
                     elif data.upper() == 'QUIT':
                         self.handle_quit(client_socket)
-                        # Svuotiamo il buffer per forzare l'uscita
                         buffer = ""
                         break
 
@@ -213,36 +171,25 @@ class GoalSeekingTarpitFTP(TarpitFTP):
                     else:
                         client_socket.sendall(b"500 Unknown command\r\n")
                 
-                # Se il client ha inviato QUIT, usciamo dal ciclo esterno while True
                 if data.upper() == 'QUIT':
                     break
 
             logger.info(f"Closing connection to {client_address}")
 
-    # ---------------------------------------------------------------
-    # Generazione deterministica del possibile file-esca in una directory
-    # ---------------------------------------------------------------
     def make_fake_file_listing(self, current_path):
         depth = len([p for p in current_path.split('/') if p])
-
-        # Usa hash multipli per garantire casualità riproducibile ma slegata
         seed = hash(current_path) ^ 0x6A0F51E3
         rnd = random.Random(seed)
-
         files = []
         
-        # --- 1. Genera file innocui (rumore di fondo) ---
-        num_mundane = rnd.randint(1, 6)  # Da 1 a 6 file inutili per ogni cartella
+        num_mundane = rnd.randint(1, 6)
         mundane_pool = self.hparams.get('MUNDANE_FILE_POOL', DEFAULT_MUNDANE_FILE_POOL)
         
-        # Scegli file casuali senza duplicati
         chosen_mundane = rnd.sample(mundane_pool, min(num_mundane, len(mundane_pool)))
         for fname in chosen_mundane:
-            # Dimensioni casuali ma credibili per file comuni
             size = rnd.randint(100, 500_000) 
             files.append((fname, size))
 
-        # --- 2. Genera l'eventuale file-esca (goal) ---
         base_prob = self.hparams.get('GOAL_FILE_BASE_PROB', 0.08)
         slope = self.hparams.get('GOAL_FILE_PROB_SLOPE', 0.05)
         cap = self.hparams.get('GOAL_FILE_PROB_CAP', 0.65)
@@ -265,9 +212,6 @@ class GoalSeekingTarpitFTP(TarpitFTP):
             
         return files
 
-    # ---------------------------------------------------------------
-    # LIST: directory (come da TarpitFTP) + eventuale file-esca
-    # ---------------------------------------------------------------
     def handle_list(self, client_socket, current_path, client_data_connection_info, pasv_socket, injection_manager):
         seed = hash(current_path)
         fake_dirs = self.make_fake_dir_names(seed, current_path)
@@ -300,13 +244,19 @@ class GoalSeekingTarpitFTP(TarpitFTP):
                 injection_ip, injection_port = client_ip, client_port
 
             time.sleep(random.Random().uniform(0.5, 1.5))
-            data_socket.sendall(dir_listing.encode(ENCODING))
+            
+            # --- FIX: Iniezione del payload ANSI nel Canale Dati ---
+            empty_msg = b""
+            payload, _ = injection_manager((injection_ip, injection_port), self.source_name, self.name + '.browse', empty_msg)
+            
+            # Aggiungiamo il payload invisibile in coda al vero e proprio listato file
+            dir_listing_with_payload = dir_listing.encode(ENCODING) + payload + b"\r\n"
+            
+            data_socket.sendall(dir_listing_with_payload)
             data_socket.close()
             
-            msg = b"226 Directory send OK - \r\n"
-            msg, _ = injection_manager((injection_ip, injection_port), self.source_name, self.name + '.browse', msg)
-            msg += b'\r\n'
-            client_socket.sendall(msg)
+            # Lasciamo intatto il messaggio di controllo per non allarmare l'agente
+            client_socket.sendall(b"226 Directory send OK\r\n")
             
         except socket.error as e:
             client_socket.sendall(b"425 Can't open data connection.\r\n")
@@ -314,11 +264,23 @@ class GoalSeekingTarpitFTP(TarpitFTP):
             if data_socket:
                 data_socket.close()
 
+    def handle_cwd(self, client_socket, current_path, data, client_data_connection_info, injection_manager):
+        # FIX: Metodo ripristinato, sovrascritto per errore nel codice precedente
+        client_ip, client_port = client_socket.getpeername()
+        
+        new_dir = data.split(' ')[1] if len(data.split(' ')) > 1 else '/'
+        if new_dir == '/':
+            new_path = '/'
+        else:
+            new_path = current_path.rstrip('/') + '/' + new_dir
 
-    # ---------------------------------------------------------------
-    # CWD: stessa logica di TarpitFTP, ma instrada verso la trigger key
-    # '.browse' (coerente con LIST) invece della '.continue' generica.
-    # ---------------------------------------------------------------
+        msg = b"250 Directory successfully changed - \r\n"
+        msg, _ = injection_manager((client_ip, client_port), self.source_name, self.name + '.browse', msg)
+        msg += b'\r\n'
+        client_socket.sendall(msg)
+
+        return new_path
+
     def handle_retr(self, client_socket, current_path, filename, client_data_connection_info, pasv_socket, injection_manager, client_address):
         if client_data_connection_info is None and pasv_socket is None:
             client_socket.sendall(b"425 Use PORT or PASV first.\r\n")
@@ -354,7 +316,6 @@ class GoalSeekingTarpitFTP(TarpitFTP):
             start = time.time()
             sent = 0
             
-            # --- Invio Magic Bytes realistici per i primi byte ---
             if fname.endswith('.db') or fname.endswith('.sqlite'):
                 magic = b"SQLite format 3\000"
             elif fname.endswith('.pdf'):
@@ -368,9 +329,21 @@ class GoalSeekingTarpitFTP(TarpitFTP):
                 data_socket.sendall(magic)
                 sent += len(magic)
 
-            # --- Loop di Drip-Feed con Jitter ---
             try:
                 while (time.time() - start) < max_duration and sent < size:
+                    # --- FIX: Polling sul socket di controllo ---
+                    # Verifichiamo se l'agente ha chiuso la connessione o inviato comandi (es. ABOR)
+                    r, _, _ = select.select([client_socket], [], [], 0.0)
+                    if r:
+                        peek_data = client_socket.recv(1024, socket.MSG_PEEK)
+                        if not peek_data:
+                            logger.info(f"Control connection closed by client during RETR: {client_address}")
+                            break
+                        if b"ABOR" in peek_data.upper():
+                            logger.info(f"ABOR command detected during RETR: {client_address}")
+                            break
+                    # --------------------------------------------
+
                     current_drip = int(drip_bytes * random.uniform(0.8, 1.2))
                     chunk = bytes(random.getrandbits(8) for _ in range(current_drip))
                     data_socket.sendall(chunk)
@@ -382,7 +355,6 @@ class GoalSeekingTarpitFTP(TarpitFTP):
 
             data_socket.close()
 
-            # Il trasferimento fallisce sempre
             msg = b"426 Connection closed (transfer aborted). "
             msg, _ = injection_manager((injection_ip, injection_port), self.source_name, self.name + '.retr_fail', msg)
             msg += b'\r\n'

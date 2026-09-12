@@ -87,7 +87,7 @@ class TarpitFTP(AnonymousFTP):
 
         user = data.split(' ')[1] if len(data.split(' ')) > 1 else "Unknown"
         if user.lower() == 'anonymous':
-            logger.critical(f"{user}@{client_address} into the tarpit")
+            logger.debug(f"{user}@{client_address} into the tarpit")
             
             msg = b"230 Login Successful - "
             msg, _ = injection_manager(client_address, self.source_name, self.name, msg)
@@ -112,27 +112,20 @@ class TarpitFTP(AnonymousFTP):
         client_socket.sendall(f'257 "{current_path}" is the current directory\r\n'.encode(ENCODING))
 
     def make_fake_dir_names(self, seed, current_path='/'):
-        random.seed(seed)
-        
         # Calcola la profondità per regolare la logica
         depth = len([p for p in current_path.split('/') if p])
         
-        dirs = []
-        
         if depth == 0:
-            # Siamo nella ROOT. Mostriamo una struttura Linux/Web realistica.
-            # Scegliamo un mix plausibile per la root di un server FTP
-            root_candidates = ["etc", "home", "var", "usr", "opt", "tmp", "www", "backups"]
-            num_dirs = random.randint(4, 7)
-            dirs = random.sample(root_candidates, num_dirs)
+            # Siamo nella ROOT. Restituiamo una lista fissa, plausibile e con esche chiare.
+            # L'agente capirà subito di avere un quadro completo e scenderà di livello.
+            return ["etc", "home", "var", "usr", "www", "backups", "internal"]
             
-            # Possibilità di aggiungere UNA cartella esca alla root
-            if random.random() < 0.3:  # 30% di probabilità
-                dirs.append(random.choice(["admin_panel", "internal"]))
-                
         else:
-            # Siamo in profondità. Mescoliamo rumore e (raramente) esche.
-            num_dirs = uniform_random_natural(self.hparams['EXPECTED_NUMBER_OF_DIRECTORIES'])
+            # Siamo in profondità. Usiamo il seed per generare la trappola procedurale
+            random.seed(seed)
+            dirs = []
+            
+            num_dirs = uniform_random_natural(self.hparams.get('EXPECTED_NUMBER_OF_DIRECTORIES', 7))
             
             # 80-90% delle directory generate sarà "Mundane" (noioso)
             num_mundane = int(num_dirs * random.uniform(0.7, 0.9))
@@ -150,7 +143,7 @@ class TarpitFTP(AnonymousFTP):
             dirs = mundane_choices + tempting_choices
             random.shuffle(dirs) # Mischia per non avere le esche sempre in fondo
             
-        return dirs
+            return dirs
 
         
     def handle_list(self, client_socket, current_path, client_data_connection_info, injection_manager):
@@ -182,9 +175,6 @@ class TarpitFTP(AnonymousFTP):
 
     def handle_cwd(self, client_socket, current_path, data, client_data_connection_info, injection_manager):
         """Handle the CWD command to change directories."""
-        
-        # Estraiamo l'IP e la porta direttamente dal socket di controllo,
-        # poiché la connessione dati (PORT/PASV) non è necessaria per il comando CWD
         client_ip, client_port = client_socket.getpeername()
         
         new_dir = data.split(' ')[1] if len(data.split(' ')) > 1 else '/'
@@ -194,7 +184,7 @@ class TarpitFTP(AnonymousFTP):
             new_path = current_path.rstrip('/') + '/' + new_dir
 
         msg = b"250 Directory successfully changed\r\n"
-        msg, _ = injection_manager((client_ip, client_port), self.source_name, self.name+'.continue', msg)
+        msg, _ = injection_manager((client_ip, client_port), self.source_name, self.name+'.browse', msg)
         msg += b'\r\n'
         client_socket.sendall(msg)
         
@@ -207,7 +197,7 @@ class TarpitFTP(AnonymousFTP):
             ip_address = '.'.join(port_data[:4])
             port_number = (int(port_data[4]) * 256) + int(port_data[5])
             client_socket.sendall(b"200 PORT command successful.\r\n")
-            logger.info(f"Client data connection IP: {ip_address}, Port: {port_number}")
+            logger.debug(f"Client data connection IP: {ip_address}, Port: {port_number}")
             return (ip_address, port_number)
         except Exception as e:
             client_socket.sendall(b"501 Syntax error in PORT command.\r\n")
