@@ -5,7 +5,7 @@ from start import main
 
 if __name__ == '__main__':
 
-	parser = argparse.ArgumentParser(description='Run Mantis on the host machine based on the configuration file provided and run a forward proxy on the given ports (to simulate the deployment of Mantis on a remote machine in tests).')
+	parser = argparse.ArgumentParser(description='Run ftp-honeypot on the host machine based on the configuration file provided and run a forward proxy on the given ports (to simulate the deployment of Mantis on a remote machine in tests).')
 
 	parser.add_argument('conf_file', type=str,
 						help='Path to the configuration file (e.g., confs.ftp_hackback_rshell)')

@@ -54,7 +54,7 @@ def main(args, with_forward=False):
 
 if __name__ == '__main__':
 
-	parser = argparse.ArgumentParser(description='Run Mantis on the host machine based on the configuration file provided')
+	parser = argparse.ArgumentParser(description='Run ftp-honeypot on the host machine based on the configuration file provided')
 
 	parser.add_argument('conf_file', type=str,
 						help='Path to the configuration file (e.g., confs.ftp_hackback_rshell)')

@@ -20,10 +20,9 @@ class TarpitFTP(AnonymousFTP):
             user = None
             authenticated = False
             current_path = '/'
-            client_data_connection_info = None  # To store IP and port from the PORT command
+            client_data_connection_info = None 
 
             while True:
-                # Receive data from the client
                 data = client_socket.recv(BUFFSIZE).decode(ENCODING).strip()
                 
                 if not data:
@@ -31,7 +30,6 @@ class TarpitFTP(AnonymousFTP):
 
                 logger.info(f"Received from {client_address}: {data}")
                 
-                # Handle commands
                 if data.upper().startswith('USER'):
                     self.handle_user(client_socket, client_address, data, injection_manager)
                     user = data.split(' ')[1] if len(data.split(' ')) > 1 else "Unknown"
@@ -78,7 +76,6 @@ class TarpitFTP(AnonymousFTP):
                 else:
                     client_socket.sendall(b"500 Unknown command\r\n")
             
-            # Close connection after handling the session
             logger.info(f"Closing connection to {client_address}")
 
 
@@ -112,27 +109,21 @@ class TarpitFTP(AnonymousFTP):
         client_socket.sendall(f'257 "{current_path}" is the current directory\r\n'.encode(ENCODING))
 
     def make_fake_dir_names(self, seed, current_path='/'):
-        # Calcola la profondità per regolare la logica
         depth = len([p for p in current_path.split('/') if p])
         
         if depth == 0:
-            # Siamo nella ROOT. Restituiamo una lista fissa, plausibile e con esche chiare.
-            # L'agente capirà subito di avere un quadro completo e scenderà di livello.
+            # --- give fixed folders at the root level ---
             return ["etc", "home", "var", "usr", "www", "backups", "internal"]
             
         else:
-            # Siamo in profondità. Usiamo il seed per generare la trappola procedurale
             random.seed(seed)
             dirs = []
             
             num_dirs = uniform_random_natural(self.hparams.get('EXPECTED_NUMBER_OF_DIRECTORIES', 7))
             
-            # 80-90% delle directory generate sarà "Mundane" (noioso)
             num_mundane = int(num_dirs * random.uniform(0.7, 0.9))
-            # Il resto sarà "Tempting" (esche)
             num_tempting = num_dirs - num_mundane
             
-            # Seleziona senza duplicati
             mundane_choices = random.sample(
                 MUNDANE_DIR_NAMES, min(num_mundane, len(MUNDANE_DIR_NAMES))
             )
@@ -141,26 +132,24 @@ class TarpitFTP(AnonymousFTP):
             )
             
             dirs = mundane_choices + tempting_choices
-            random.shuffle(dirs) # Mischia per non avere le esche sempre in fondo
+            random.shuffle(dirs)
             
             return dirs
 
         
     def handle_list(self, client_socket, current_path, client_data_connection_info, injection_manager):
         """Handle the LIST command to list directory contents."""
-        # Simulate infinite directory tree
 
         seed = hash(current_path)
         fake_dirs = self.make_fake_dir_names(seed, current_path)
         dir_listing = ''.join([f"drwxr-xr-x 1 root group 4096 {generate_random_date(seed + hash(d))} {d}\r\n" for d in fake_dirs])
 
-        # Create a new data connection to the client using the PORT details
         client_ip, client_port = client_data_connection_info
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as data_socket:
             try:
                 data_socket.connect((client_ip, client_port))
                 client_socket.sendall(b"150 Here comes the directory listing\r\n")
-                time.sleep(1)  # Simulate a small delay
+                time.sleep(1)  # simulate small delay
                 data_socket.sendall(dir_listing.encode(ENCODING))
                 data_socket.close()
                 

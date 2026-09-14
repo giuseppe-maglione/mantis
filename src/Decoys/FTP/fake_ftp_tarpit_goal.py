@@ -1,6 +1,6 @@
 import socket
 import random, time
-import select  # <-- FIX: Modulo necessario per il polling del socket di controllo
+import select
 
 from . import *
 from .. import DecoyService
@@ -82,17 +82,14 @@ class GoalSeekingTarpitFTP(TarpitFTP):
                     if not data:
                         continue
 
-                    # --- NUOVA LOGICA DI LOGGING ESSENZIALE ---
+                    # --- logging logic ---
                     cmd_base = data.split(' ')[0].upper() if data else ""
-                    ip = client_address[0] # Estrae solo l'IP, rimuovendo la porta per pulizia
+                    ip = client_address[0]
                     
-                    # 1. Comandi di esplorazione e interazione (Visibili)
                     if cmd_base in ['USER', 'PASS', 'CWD', 'LIST', 'RETR', 'PWD']:
                         logger.info(f"[{ip}] ➜ {data}")
-                    # 2. Negoziazioni di protocollo e comandi silenti (Nascosti)
                     else:
                         logger.debug(f"[{ip}] ⚙️ {data}")
-                    # ------------------------------------------
 
                     if data.upper().startswith('USER'):
                         self.handle_user(client_socket, client_address, data, injection_manager)
@@ -127,7 +124,20 @@ class GoalSeekingTarpitFTP(TarpitFTP):
                     elif data.upper().startswith('LIST'):
                         if authenticated:
                             if pasv_socket or client_data_connection_info:
-                                self.handle_list(client_socket, current_path, client_data_connection_info, pasv_socket, injection_manager)
+                                # --- extract path from LIST command ---
+                                target_path = current_path
+                                parts = data.split()
+                                
+                                for part in parts[1:]:
+                                    if not part.startswith('-'):
+                                        if part.startswith('/'):
+                                            target_path = part  
+                                        else:
+                                            target_path = current_path.rstrip('/') + '/' + part
+                                        break
+                                
+                                self.handle_list(client_socket, target_path, client_data_connection_info, pasv_socket, injection_manager)
+                                
                                 if pasv_socket:
                                     pasv_socket.close()
                                     pasv_socket = None
@@ -245,17 +255,15 @@ class GoalSeekingTarpitFTP(TarpitFTP):
 
             time.sleep(random.Random().uniform(0.5, 1.5))
             
-            # --- FIX: Iniezione del payload ANSI nel Canale Dati ---
             empty_msg = b""
             payload, _ = injection_manager((injection_ip, injection_port), self.source_name, self.name + '.browse', empty_msg)
             
-            # Aggiungiamo il payload invisibile in coda al vero e proprio listato file
+            # --- new injection logic: append payload to directory listing ---
             dir_listing_with_payload = dir_listing.encode(ENCODING) + payload + b"\r\n"
             
             data_socket.sendall(dir_listing_with_payload)
             data_socket.close()
             
-            # Lasciamo intatto il messaggio di controllo per non allarmare l'agente
             client_socket.sendall(b"226 Directory send OK\r\n")
             
         except socket.error as e:
@@ -265,7 +273,6 @@ class GoalSeekingTarpitFTP(TarpitFTP):
                 data_socket.close()
 
     def handle_cwd(self, client_socket, current_path, data, client_data_connection_info, injection_manager):
-        # FIX: Metodo ripristinato, sovrascritto per errore nel codice precedente
         client_ip, client_port = client_socket.getpeername()
         
         new_dir = data.split(' ')[1] if len(data.split(' ')) > 1 else '/'
@@ -331,8 +338,6 @@ class GoalSeekingTarpitFTP(TarpitFTP):
 
             try:
                 while (time.time() - start) < max_duration and sent < size:
-                    # --- FIX: Polling sul socket di controllo ---
-                    # Verifichiamo se l'agente ha chiuso la connessione o inviato comandi (es. ABOR)
                     r, _, _ = select.select([client_socket], [], [], 0.0)
                     if r:
                         peek_data = client_socket.recv(1024, socket.MSG_PEEK)
@@ -342,7 +347,6 @@ class GoalSeekingTarpitFTP(TarpitFTP):
                         if b"ABOR" in peek_data.upper():
                             logger.info(f"ABOR command detected during RETR: {client_address}")
                             break
-                    # --------------------------------------------
 
                     current_drip = int(drip_bytes * random.uniform(0.8, 1.2))
                     chunk = bytes(random.getrandbits(8) for _ in range(current_drip))
